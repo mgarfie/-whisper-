@@ -1,120 +1,155 @@
+import os
+import sys
+import threading
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, ttk, messagebox
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from zipfile import ZipFile
 import whisper
 from opencc import OpenCC
-import threading
-import os
-import subprocess
-import sys
 
 class WhisperApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("语音转文字工具")
-        self.root.geometry("750x550")
-        self.root.resizable(False, False)
+        self.root.title("语音转文字工具（使用 large 离线模型）")
+        self.root.geometry("700x500")
 
-        self.model = whisper.load_model("base")
-        self.cc = OpenCC('t2s')
-
+        self.cc = OpenCC('t2s')  # 繁体转简体
         self.file_list = []
-        self.last_filename = None
+        self.transcribed_texts = []
+        self.model_name = "large"
+        self.model = self.load_whisper_model_with_check(self.model_name)
 
-        self.create_widgets()
+        self.setup_ui()
+
+    def setup_ui(self):
+        frame = tk.Frame(self.root)
+        frame.pack(pady=10)
+
+        tk.Button(frame, text="选择文件", command=self.select_files, width=15).grid(row=0, column=0, padx=5)
+        tk.Button(frame, text="开始转录", command=self.run_transcribe_thread, width=15).grid(row=0, column=1, padx=5)
+        tk.Button(frame, text="保存文本", command=self.save_text, width=15).grid(row=0, column=2, padx=5)
+
+        self.progress = ttk.Progressbar(self.root, length=600, mode="determinate")
+        self.progress.pack(pady=5)
+
+        self.text_result = scrolledtext.ScrolledText(self.root, font=("微软雅黑", 11))
+        self.text_result.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    def create_widgets(self):
-        frame = ttk.Frame(self.root, padding="10 10 10 10")
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        self.btn_select = ttk.Button(frame, text="选择多个音频/视频文件", command=self.select_files)
-        self.btn_select.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-
-        self.btn_transcribe = ttk.Button(frame, text="开始批量转文字", command=self.run_transcribe_thread)
-        self.btn_transcribe.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-
-        self.btn_save = ttk.Button(frame, text="保存 TXT（可编辑后保存）", command=self.save_to_txt)
-        self.btn_save.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-
-        self.text_result = scrolledtext.ScrolledText(
-            frame, wrap=tk.WORD, font=("微软雅黑", 11), height=25
-        )
-        self.text_result.grid(row=1, column=0, columnspan=3, pady=10, sticky="nsew")
-
-        frame.columnconfigure(0, weight=1)
-        frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(2, weight=1)
 
     def select_files(self):
         filetypes = [("音频/视频文件", "*.mp3 *.wav *.mp4 *.m4a *.webm *.ogg"), ("所有文件", "*.*")]
-        self.file_list = list(filedialog.askopenfilenames(title="选择多个文件", filetypes=filetypes))
-        if self.file_list:
-            self.text_result.insert(tk.END, f"\n已选择 {len(self.file_list)} 个文件\n")
+        files = filedialog.askopenfilenames(title="选择多个音频/视频文件", filetypes=filetypes)
+        if files:
+            self.file_list = list(files)
+            self.transcribed_texts = []
+            self.text_result.delete("1.0", tk.END)
+            self.text_result.insert(tk.END, "已选择文件:\n")
+            for f in self.file_list:
+                self.text_result.insert(tk.END, f"{f}\n")
 
     def run_transcribe_thread(self):
         if not self.file_list:
-            self.text_result.insert(tk.END, "请先选择文件！\n")
+            messagebox.showwarning("警告", "请先选择文件")
             return
-        threading.Thread(target=self.transcribe_files).start()
+        threading.Thread(target=self.transcribe_all_files, daemon=True).start()
 
-    def transcribe_files(self):
-        self.btn_transcribe.config(state=tk.DISABLED)
-        self.text_result.insert(tk.END, "\n开始转录...\n")
+    def transcribe_all_files(self):
+        self.text_result.insert(tk.END, "\n开始转录多个文件...\n")
+        self.transcribed_texts = []
+        total_files = len(self.file_list)
+        self.progress["maximum"] = total_files
+        self.progress["value"] = 0
 
-        combined_text = ""
-        for file in self.file_list:
+        for idx, f in enumerate(self.file_list, 1):
+            self.text_result.insert(tk.END, f"\n[{idx}/{total_files}] 正在转录: {f}\n")
+            self.text_result.see(tk.END)
             try:
-                self.text_result.insert(tk.END, f"\n正在处理：{file}\n")
-                result = self.model.transcribe(file)
-                text = self.cc.convert(result["text"])
-                combined_text += f"\n【{os.path.basename(file)}】\n{text}\n" + "-" * 50 + "\n"
-                self.text_result.insert(tk.END, f"{text}\n" + "-" * 50 + "\n")
-                self.last_filename = os.path.basename(file)
+                result = self.model.transcribe(f)
+                text = result["text"]
+                simplified = self.cc.convert(text)
+                self.transcribed_texts.append(simplified)
+                self.text_result.insert(tk.END, simplified + "\n")
             except Exception as e:
-                self.text_result.insert(tk.END, f"\n[错误] {file} 转录失败：{e}\n")
+                self.text_result.insert(tk.END, f"转录失败: {e}\n")
+            self.progress["value"] = idx
+            self.progress.update()
+            self.text_result.see(tk.END)
 
-        self.text_result.insert(tk.END, "\n所有文件已转录完成。\n")
-        self.btn_transcribe.config(state=tk.NORMAL)
+        self.text_result.insert(tk.END, "\n所有文件转录完成。\n")
 
-    def save_to_txt(self):
-        content = self.text_result.get("1.0", tk.END).strip()
-        if not content:
-            self.text_result.insert(tk.END, "没有内容可保存，请先转录或编辑。\n")
+    def save_text(self):
+        if not self.transcribed_texts:
+            messagebox.showwarning("警告", "没有转录文本可保存")
             return
-        default_name = (self.last_filename or "transcript").replace(" ", "_") + "_edited.txt"
-        file_path = filedialog.asksaveasfilename(defaultextension=".txt",
-                                                 filetypes=[("文本文件", "*.txt")],
-                                                 initialfile=default_name)
-        if file_path:
+        text_to_save = self.text_result.get("1.0", tk.END).strip()
+        if not text_to_save:
+            messagebox.showwarning("警告", "预览区没有内容")
+            return
+        save_path = filedialog.asksaveasfilename(
+            title="保存文本文件",
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")]
+        )
+        if save_path:
             try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                self.open_file(file_path)
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(text_to_save)
             except Exception as e:
-                self.text_result.insert(tk.END, f"保存失败：{e}\n")
-
-    def open_file(self, path):
-        try:
-            if os.name == 'nt':
-                os.startfile(path)
-            elif os.name == 'posix':
-                subprocess.call(['open' if sys.platform == 'darwin' else 'xdg-open', path])
-        except Exception as e:
-            self.text_result.insert(tk.END, f"无法打开文件：{e}\n")
+                messagebox.showerror("错误", f"保存失败：{e}")
+            else:
+                self.root.title(f"语音转文字工具 - 已保存: {os.path.basename(save_path)}")
 
     def on_closing(self):
-        if messagebox.askokcancel("退出确认", "确定要退出程序吗？"):
-            try:
-                del self.model
-            except:
-                pass
-            self.file_list = []
-            self.root.destroy()
+        self.file_list.clear()
+        self.transcribed_texts.clear()
+        self.root.destroy()
 
+    def get_whisper_cache_path(self):
+        if sys.platform == "win32":
+            user_profile = os.getenv("USERPROFILE")
+            path = os.path.join(user_profile, ".cache", "whisper")
+        else:
+            home = os.path.expanduser("~")
+            path = os.path.join(home, ".cache", "whisper")
+        return path
+
+    def model_exists(self, model_name):
+        cache_path = self.get_whisper_cache_path()
+        model_path = os.path.join(cache_path, model_name)
+        return os.path.isdir(model_path)
+
+    def extract_model_from_zip(self, model_name):
+        cache_path = self.get_whisper_cache_path()
+        model_path = os.path.join(cache_path, model_name)
+        if not os.path.exists(model_path):
+            os.makedirs(model_path, exist_ok=True)
+            zip_path = os.path.join(os.getcwd(), f"{model_name}.zip")
+            if not os.path.exists(zip_path):
+                messagebox.showerror("错误", f"未找到模型压缩包：{zip_path}")
+                return False
+            try:
+                with ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(model_path)
+                return True
+            except Exception as e:
+                messagebox.showerror("错误", f"模型解压失败：{e}")
+                return False
+        return True
+
+    def load_whisper_model_with_check(self, model_name):
+        if not self.model_exists(model_name):
+            result = messagebox.askokcancel(
+                "模型提取",
+                f"未检测到模型文件夹 '{model_name}'，是否从本地 zip 解压模型？"
+            )
+            if not result:
+                sys.exit("用户取消模型提取，程序退出")
+            if not self.extract_model_from_zip(model_name):
+                sys.exit("模型解压失败，程序退出")
+        return whisper.load_model(model_name)
 
 if __name__ == "__main__":
     root = tk.Tk()
-    style = ttk.Style()
-    style.configure("TButton", font=("微软雅黑", 10), padding=6)
     app = WhisperApp(root)
     root.mainloop()
